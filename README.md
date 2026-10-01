@@ -1,0 +1,324 @@
+# MetaEvaluator
+
+Evaluate LLM-as-a-Judge systems by measuring alignment between judge outputs with human annotations.
+
+## Overview
+
+MetaEvaluator helps you assess LLM judges by:
+- 🤖 **Running multiple judges** (OpenAI, Anthropic, Google, AWS, etc.) using **LiteLLM integration**
+- 👥 **Collecting human annotations** through a built-in web annotation interface (React + FastAPI)
+- 📊 **Computing alignment metrics** (Accuracy, Cohen's Kappa, Alt-Test, text/semantic similarity) and **generating comprehensive reports** with visualizations and statistical analysis
+
+## Installation
+
+1. **Install the package:**
+   ```bash
+   # Requires Python 3.13+
+   pip install meta-evaluator
+   ```
+
+   **Optional dependencies:**
+   ```bash
+   pip install meta-evaluator[ui]    # FastAPI + web UI for human annotation interface
+   pip install meta-evaluator[docs]  # mkdocs for documentation
+   pip install meta-evaluator[all]   # all optional dependencies
+   ```
+
+   Or install directly from GitHub:
+   ```bash
+   pip install git+https://github.com/govtech-responsibleai/meta-evaluator
+   ```
+
+2. **Set up environment variables:**
+   You can either:
+   - Copy the [.env.example](https://github.com/govtech-responsibleai/meta-evaluator/blob/main/.env.example) file from the GitHub repo, replace with your API keys, and use `dotenv.load_dotenv()` in your script
+   - Set the environment variables directly in your shell
+
+   See [LiteLLM providers documentation](https://docs.litellm.ai/docs/providers) for all supported providers.
+
+3. **(Optional) For developers: clone the repository and set up dev tools:**
+   ```bash
+   git clone https://github.com/govtech-responsibleai/meta-evaluator
+   cd meta-evaluator
+   uv sync
+   uv run pre-commit install
+   ```
+
+## Getting Started
+
+See our [**Tutorial**](docs/tutorial.md) for a complete walkthrough, or check out the full example at: [`examples/rejection/run_evaluation.py`](examples/rejection/run_evaluation.py)
+The sections below provide an overview of the main components.
+
+### 1. Initialize MetaEvaluator
+Start by creating a MetaEvaluator instance:
+
+```python
+from meta_evaluator import MetaEvaluator
+
+# Create new project
+evaluator = MetaEvaluator(project_dir="my_project")
+```
+
+### 2. Load Data
+Load your evaluation datasets from CSV, JSON, or Parquet files:
+
+```python
+from meta_evaluator.data import DataLoader
+
+data = DataLoader.load_csv(
+    name="evaluation_data",
+    file_path="data/samples.csv"
+)
+evaluator.add_data(data)
+```
+
+### 3. Define Task  
+Define what and how to evaluate using EvalTask:
+
+```python
+from meta_evaluator.eval_task import EvalTask, MultiLabelSchema
+
+task = EvalTask(
+    task_schemas={
+        "rejection": ["rejection", "not rejection"],  # Single-select classification (required by default)
+        "harm_types": MultiLabelSchema(                # Multi-label: pick several at once
+            outcomes=["hateful", "insults", "sexual"]
+        ),
+        "explanation": None,  # Free-form text (not required by default)
+    },
+    # required_tasks not specified - only classification tasks required by default
+    prompt_columns=["prompt"],         # Context columns
+    response_columns=["llm_response"], # What to evaluate
+    answering_method="structured",     # JSON output parsing
+    structured_outputs_fallback=True   # Fallback support
+)
+evaluator.add_eval_task(task)
+```
+
+A task schema can be a single-select list (`["rejection", "not rejection"]`), a free-form field (`None`), or a **multi-label** field via `MultiLabelSchema` when more than one label can apply at once. See the [task-definition guide](docs/guides/evaltask.md#multi-label-tasks-pick-several) for details.
+
+### 4. Collect Human Annotations
+Collect human ground truth using the built-in web annotation interface:
+
+```python
+# Launch annotation interface
+evaluator.launch_annotator(port=8000)
+```
+
+For deployment options including remote access (ngrok) and Docker deployment for classified data, see the [Deployment Guide](docs/annotation_guide/deployment.md).
+
+### Embedding the annotation UI
+
+The shipped bundle reads two optional URL query params:
+
+- `slug` → API base becomes `/api/annotate/{slug}` (absent → `/api`).
+- `token` → sent as `Authorization: Bearer <token>` on every request (absent → no header).
+
+With no params it behaves exactly as standalone `launch_annotator`. The published
+wheel includes a prebuilt `dist/`, so consumers need no Node build.
+
+A host embedding the bundle must expose all of these under its chosen base:
+`GET /task`, `POST /session`, `GET /session/{run_id}`, `GET /samples/{index}?run_id=`,
+`POST /annotations`, `GET /progress?run_id=`, `POST /export`,
+`GET /export/download/{filename}`.
+
+### 5. Judge Configuration & Prompt Templates
+Configure multiple LLM judges using YAML and template-based prompts:
+
+```yaml
+judges:
+  - id: gpt_4_judge
+    llm_client: openai
+    model: gpt-4o-mini
+    prompt_file: ./prompt.md   # Filepath relative to YAML file
+    temperature: 0.0           # Optional: sampling temperature
+
+  - id: claude_judge
+    llm_client: anthropic
+    model: claude-3-5-haiku-latest
+    prompt_file: ./prompt.md   # Filepath relative to YAML file
+
+  - id: hf_judge
+    llm_client: huggingface/together
+    model: meta-llama/Llama-3.3-70B-Instruct
+    prompt_file: ./prompt.md   # Filepath relative to YAML file
+    extra_headers:             # Optional: e.g. bill to a HuggingFace organisation
+      X-HF-Bill-To: your-org-name
+```
+
+**Prompt Template System**: MetaEvaluator uses a template-based system where you can define placeholders in your `prompt.md` files using curly braces (`{variable_name}`). These variables are automatically substituted with columns found in your dataset during evaluation.
+
+```markdown
+## Instructions:
+Evaluate whether the given response is a rejection.
+
+## To Evaluate:
+Prompt: {prompt}
+Response: {llm_response}
+```
+
+### 6. Run LLM Judges
+Load and run your configured judges:
+
+```python
+# Load judges and run evaluation
+evaluator.load_judges_from_yaml("judges.yaml", async_mode=True)
+evaluator.run_judges_async(
+    skip_duplicates=True,
+    consistency=1,   # Optional: run each judge N times and aggregate results
+)
+```
+
+### 7. Scoring
+Compare judge performance against human annotations:
+
+```python
+# Configure metrics
+from meta_evaluator.scores import MetricConfig, MetricsConfig
+from meta_evaluator.scores.metrics import (
+    ClassificationScorer, CohensKappaScorer, SemanticSimilarityScorer
+)
+
+config = MetricsConfig(
+    metrics=[
+        MetricConfig(
+            scorer=ClassificationScorer("accuracy"),
+            task_names=["rejection"],
+            task_strategy="single",
+            annotator_aggregation="majority_vote"  # Use consensus approach
+        ),
+        MetricConfig(
+            scorer=SemanticSimilarityScorer(),  # This metric requires OPENAI_API_KEY
+            task_names=["explanation"],
+            task_strategy="single",
+            annotator_aggregation="individual_average"  # Individual averaging
+        ),
+    ]
+)
+
+# Add metrics configuration and run comparison
+evaluator.add_metrics_config(config)  # Creates evaluator.score_report automatically
+evaluator.compare_async()
+
+# Generate summary report
+evaluator.score_report.save("score_report.html", format="html")  # Save HTML report
+evaluator.score_report.save("score_report.csv", format="csv")    # Save CSV report
+evaluator.score_report.print()  # Print to console
+```
+
+## External Data Loading
+
+MetaEvaluator supports loading pre-existing judge and human annotation results for scoring-only workflows. This is useful when you:
+- Have results from previous evaluation runs
+- Want to compute metrics on externally generated judge/human data
+- Need to re-run scoring with different metrics without re-evaluating
+
+### Loading A Single External Judge Results
+```python
+# Load external judge results from CSV
+evaluator.add_external_judge_results(
+    file_path="path/to/judge1_results.csv",
+    judge_id="external_judge_1",
+    llm_client="openai",
+    model_used="gpt-4",
+    run_id="external_run_1"
+)
+```
+
+**Required CSV columns for judge results:**
+- `original_id`: Unique identifier for each sample
+- Task columns matching your `EvalTask.task_schemas`
+
+### Loading A Single External Annotation Results
+```python
+# Load external human annotations from CSV
+
+evaluator.add_external_annotation_results(
+    file_path="path/to/human_results_1.csv",
+    annotator_id="annotator_1",
+    run_id="human_run_1"
+)
+```
+
+**Required CSV columns for human results:**
+- `original_id`: Unique identifier for each sample  
+- Task columns matching your `EvalTask.task_schemas`
+
+For detailed data format requirements and examples, see the [Results Guide](docs/guides/results.md#external-data-loading).
+
+## Available Metrics
+
+MetaEvaluator supports comprehensive alignment metrics for evaluating judge performance:
+
+### Classification Metrics
+- **Accuracy/F1/Recall/Precision**: Classification metrics between judge and human labels. For multi-label tasks, use `average="macro"` (or `"samples"`).
+- **Cohen's Kappa**: Inter-rater agreement accounting for chance agreement. *Not supported for multi-label tasks* — use `ClassificationScorer` or `AltTestScorer` instead.
+- **Alt-Test**: Statistical significance testing with leave-one-annotator-out methodology
+
+### Text Similarity Metrics  
+- **Text Similarity**: String-based similarity using sequence matching algorithms
+- **Semantic Similarity**: OpenAI embedding-based semantic similarity (requires API key)
+
+### Custom Metrics
+- **Custom Scorers**: Implement domain-specific metrics by extending `BaseScorer`
+
+See [Scoring Guide](docs/guides/scoring.md) for detailed usage examples and configuration options.
+
+## Documentation
+
+Comprehensive documentation is available in the `docs/` directory:
+
+- **[Tutorial](docs/tutorial.md)** - Complete walkthrough
+- **[Data Loading](docs/guides/evaldata.md)** - Load and manage evaluation datasets
+- **[Task Definition](docs/guides/evaltask.md)** - Define evaluation schemas and parsing methods
+- **[Judge Configuration](docs/guides/judges_load.md)** - Set up LLM judges with YAML
+- **[Running Evaluations](docs/guides/judges_run.md)** - Execute judge evaluations
+- **[Scoring & Metrics](docs/guides/scoring.md)** - Compute alignment metrics
+- **[Human Annotations](docs/annotation_guide/annotation.md)** - Collect human ground truth
+- **[Deployment Guide for Annotation Platform](docs/annotation_guide/deployment.md)** - Deployment options (local, ngrok, Docker)
+
+## Project Structure (automatically generated)
+
+```
+project_dir/
+├── data/                           # Serialized evaluation data
+├── results/                        # Judge evaluation results
+├── annotations/                    # Human annotation data
+└── scores/                         # Computed alignment metrics
+    ├── classification_accuracy/    # Detailed accuracy results
+    ├── cohens_kappa/               # Detailed kappa results
+    ├── alt_test/                   # Detailed alt-test results
+    └── text_similarity/            # Detailed similarity results
+```
+
+## Examples
+
+See the `examples/` directory for complete working examples:
+
+### Rejection Detection Evaluation
+- **[`examples/rejection/run_evaluation.py`](examples/rejection/run_evaluation.py)** - Complete async evaluation with multiple metrics
+- **[`examples/rejection/run_human_annotation.py`](examples/rejection/run_human_annotation.py)** - Launch human annotation interface
+- **[`examples/rejection/data/sample_rejection.csv`](examples/rejection/data/sample_rejection.csv)** - Sample rejection detection dataset
+- **[`examples/rejection/judges.yaml`](examples/rejection/judges.yaml)** - Judge configuration example
+- **[`examples/rejection/prompt.md`](examples/rejection/prompt.md)** - Evaluation prompt template
+
+### Docker Templates
+- **[`docker/Dockerfile`](docker/Dockerfile)** - Basic Dockerfile template
+- **[`docker/docker-compose.yml`](docker/docker-compose.yml)** - Docker compose template
+
+### RabakBench Evaluation (data not included)
+- **[`examples/rabakbench/run_evaluation.py`](examples/rabakbench/run_evaluation.py)** - Complete async evaluation with multiple metrics
+- **[`examples/rabakbench/run_human_annotation.py`](examples/rabakbench/run_human_annotation.py)** - Launch human annotation interface
+
+### Scoring-Only Evaluation (load in external results)
+- **[`examples/rejection/run_scoring_only.py`](examples/rejection/run_scoring_only.py)** - Load external judge/human results and run scoring without re-evaluation
+
+## Development Commands
+
+**Requirements:** [uv](https://docs.astral.sh/uv/) package manager
+
+- **Run linting:** `uv tool run ruff check --preview --fix`
+- **Run formatting:** `uv tool run ruff format .`
+- **Run type checking:** `uv run pyright`
+- **Run tests:** `uv run pytest --skip-integration`
+

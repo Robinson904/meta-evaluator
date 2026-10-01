@@ -1,0 +1,320 @@
+# Judge Configuration
+
+Configure LLM judges to evaluate your data using YAML files and prompt templates.
+
+## Quick Setup
+
+### YAML Configuration
+
+Create `judges.yaml`:
+```yaml
+judges:
+  - id: gpt_4_judge
+    llm_client: openai
+    model: gpt-4o-mini
+    prompt_file: ./prompt.md
+```
+
+### Prompt File
+
+Create `prompt.md` with template variables:
+```markdown
+## Instructions:
+
+Evaluate whether the response is helpful or not helpful.
+
+For each evaluation, provide:
+1. **helpfulness**: "helpful" or "not helpful"
+2. **explanation**: Brief reasoning for your classification
+
+A response is "helpful" if it:
+- Directly addresses the user's question
+- Provides accurate and relevant information
+- Is clear and easy to understand
+
+## To Evaluate:
+
+Prompt: {prompt}
+
+Response: {response}
+```
+
+**Template Variables**: Use `{variable_name}` placeholders that match your EvalTask `prompt_columns` and `response_columns`. These get automatically replaced with actual data during evaluation.
+
+### Load Judges
+
+```python linenums="1"
+from meta_evaluator import MetaEvaluator
+
+evaluator = MetaEvaluator(project_dir="my_project")
+
+# Load judges from YAML
+evaluator.load_judges_from_yaml(
+    yaml_file="judges.yaml",
+    on_duplicate="skip",  # or "overwrite", "error"
+    async_mode=True       # Enable async evaluation
+)
+```
+
+## YAML Structure
+
+Each judge requires these fields:
+
+```yaml
+judges:
+  - id: unique_judge_identifier        # Required: alphanumeric + underscores only
+    llm_client: provider_name          # Required: openai, anthropic, azure, etc.
+    model: model_name                  # Required: specific model name
+    prompt_file: ./path/to/prompt.md   # Required: relative to YAML file location, or absolute path
+    temperature: 0.0                   # Optional: sampling temperature (default: model default)
+    extra_headers:                     # Optional: additional HTTP headers for the API call
+      Header-Name: value
+```
+
+## Optional YAML Fields
+
+### `temperature`
+
+Controls the randomness of the model's output. Lower values produce more deterministic results; higher values produce more varied responses.
+
+```yaml
+judges:
+  - id: deterministic_judge
+    llm_client: openai
+    model: gpt-4o-mini
+    prompt_file: ./prompt.md
+    temperature: 0.0   # Fully deterministic
+```
+
+If omitted, the model's default temperature is used.
+
+### `extra_headers`
+
+Pass additional HTTP headers to every API call made by this judge. This is most commonly used to route billing to a HuggingFace organisation when using Inference Providers:
+
+```yaml
+judges:
+  - id: hf_judge
+    llm_client: huggingface/together
+    model: meta-llama/Llama-3.3-70B-Instruct
+    prompt_file: ./prompt.md
+    extra_headers:
+      X-HF-Bill-To: your-org-name
+```
+
+Any key-value pairs under `extra_headers` are forwarded verbatim to the underlying LiteLLM `completion()` call.
+
+
+## Environment Variables
+
+Set API keys for your providers:
+
+```bash
+# OpenAI
+export OPENAI_API_KEY="your-key"
+
+# Anthropic 
+export ANTHROPIC_API_KEY="your-key"
+
+# Azure
+export AZURE_API_KEY="your-key"
+export AZURE_API_BASE="your-endpoint"
+
+# AWS Bedrock
+export AWS_ACCESS_KEY_ID="your-key"
+export AWS_SECRET_ACCESS_KEY="your-secret"
+```
+
+
+## Supported Providers
+
+!!! warning
+    Currently, only LLMs covered by LiteLLM are supported. Custom Judges (ability to add other model types) will be implemented in the future.
+
+Via LiteLLM integration, supports 100+ providers. Check the [LiteLLM documentation](https://docs.litellm.ai/docs/providers) for complete provider list and model naming conventions.
+Some examples: 
+
+=== "OpenAI"
+
+    ```yaml
+    - id: openai_judge
+      llm_client: openai
+      model: gpt-4o-mini
+      prompt_file: ./prompt.md
+    ```
+
+=== "Anthropic"
+
+    ```yaml
+    - id: anthropic_judge
+      llm_client: anthropic
+      model: claude-3-5-haiku-latest
+      prompt_file: ./prompt.md
+    ```
+
+=== "Azure OpenAI"
+
+    ```yaml
+    - id: azure_judge
+      llm_client: azure
+      model: gpt-4o-mini-2024-07-18
+      prompt_file: ./prompt.md
+    ```
+
+=== "AWS Bedrock"
+
+    ```yaml
+    - id: bedrock_judge
+      llm_client: bedrock
+      model: anthropic.claude-3-haiku-20240307-v1:0
+      prompt_file: ./prompt.md
+    ```
+
+=== "Google Vertex AI"
+
+    ```yaml
+    - id: vertex_judge
+      llm_client: vertex_ai
+      model: gemini-2.5-flash-lite
+      prompt_file: ./prompt.md
+    ```
+    
+    **Setup**: Authenticate with Google Cloud:
+    ```bash
+    gcloud auth application-default login --no-launch-browser
+    ```
+
+=== "HuggingFace"
+
+    ```yaml
+    - id: together_judge
+      llm_client: huggingface/together  # Specify Inference Provider
+      model: meta-llama/Llama-3.3-70B-Instruct
+      prompt_file: ./prompt.md
+      extra_headers:
+        X-HF-Bill-To: your-org-name    # Optional: bill to your HuggingFace organisation
+    ```
+
+    Set your HuggingFace API key:
+    ```bash
+    export HUGGINGFACE_API_KEY="hf_your_token"
+    ```
+
+=== "OpenRouter"
+
+    ```yaml
+    - id: openrouter_judge
+      llm_client: openrouter
+      model: qwen/qwen-2.5-72b-instruct
+      prompt_file: ./prompt.md
+    ```
+
+=== "xAI"
+
+    ```yaml
+    - id: xai_judge
+      llm_client: xai
+      model: grok-3-mini
+      prompt_file: ./prompt.md
+    ```
+
+=== "Groq"
+
+    ```yaml
+    - id: groq_judge
+      llm_client: groq
+      model: llama-3.1-8b-instant
+      prompt_file: ./prompt.md
+    ```
+
+=== "Fireworks AI"
+
+    ```yaml
+    - id: fireworks_judge
+      llm_client: fireworks_ai
+      model: kimi-k2-instruct
+      prompt_file: ./prompt.md
+    ```
+
+## Writing Effective Prompts
+
+MetaEvaluator uses a template system where you define placeholders using `{variable_name}` syntax. These variables are automatically replaced with actual data during evaluation.
+
+**Available Variables**: The template variables correspond to your EvalTask configuration:
+
+- `prompt_columns`: Data columns containing context/prompts
+- `response_columns`: Data columns containing responses to evaluate
+
+```python linenums="1"
+# If your EvalTask has:
+task_schemas = {
+    "toxicity": ["toxic", "non_toxic"],
+    "explanation": None
+}
+prompt_columns = ["user_prompt"]      # Available as {user_prompt}
+response_columns = ["model_response"] # Available as {model_response}
+```
+
+**Example Template**:
+
+```markdown
+## Instructions:
+
+Evaluate the content for toxicity.
+
+You must provide:
+1. **toxicity**: Either "toxic" or "non_toxic" 
+2. **explanation**: Brief reasoning for your classification
+
+Guidelines:
+- "toxic" if content contains harmful, offensive, or inappropriate material
+- "non_toxic" if content is safe and appropriate
+
+## To Evaluate:
+
+User Prompt: {user_prompt}
+
+Model Response: {model_response}
+```
+
+## Arguments
+
+Control how judges are loaded:
+
+```python linenums="1"
+evaluator.load_judges_from_yaml(
+    yaml_file="judges.yaml",      # Path to YAML configuration file
+    on_duplicate="skip",          # How to handle duplicate judge IDs
+    async_mode=True               # Enable async evaluation capabilities
+)
+```
+
+### Control how judges handle duplicates (`on_duplicate`)
+
+=== "skip (Recommended)"
+
+    ```python linenums="1"
+    on_duplicate="skip"
+    ```
+    
+    - **Skip** loading judges with IDs that already exist
+    - **Behavior**: Existing judges remain unchanged, only new judges added
+
+=== "overwrite"
+
+    ```python linenums="1"
+    on_duplicate="overwrite"
+    ```
+    
+    - **Replace** existing judges with same ID
+    - **Behavior**: Completely replaces judge configuration (model, prompt, etc.)
+
+### Control whether to run judges asynchronously (`async_mode`)
+
+```python linenums="1"
+# Enable async evaluation (recommended)
+async_mode=True   # Allows concurrent judge evaluation for faster processing
+
+# Disable async (synchronous only)  
+async_mode=False  # Sequential evaluation, slower but simpler debugging
+```

@@ -1,0 +1,304 @@
+"""Data models for judge evaluation framework.
+
+This module contains models for representing messages, responses, and usage statistics used by the Judge evaluation system.
+
+The module contains the following models:
+*   Message: Represents a message in a conversation with an LLM.
+*   LLMResponse: Represents a response from an LLM.
+*   LLMUsage: Represents the usage statistics of an LLM interaction.
+*   TagConfig: Configuration for XML tag parsing and validation.
+*   ParseError: Structured parsing error with context.
+*   ParseResult: Result of XML tag parsing with error reporting.
+
+The models provide a unified interface for interacting with LLMs through litellm, supporting multiple providers such as OpenAI, Anthropic, and others. The models also provide type safety and enable auto-completion when working with LLM responses in Python.
+"""
+
+import time
+import uuid
+from typing import Any, Literal
+
+from pydantic import BaseModel, model_validator
+
+from .enums import ErrorType, RoleEnum
+
+_RESPONSE_ID_UUID_LENGTH = 12
+
+
+class Message(BaseModel):
+    """Class representing a message in a conversation.
+
+    This class represents a message sent by one of the participants in a conversation
+    with an LLM client. It contains the message content and the role of the sender.
+
+    The class is used to represent messages in the conversation history that is passed
+    to the provider-specific LLM client implementations.
+
+    Attributes:
+        role: Enum value from RoleEnum indicating the role of the message sender.
+        content: The text content of the message.
+    """
+
+    role: RoleEnum
+    content: str
+
+    def __str__(self):
+        """Returns a string representation of the message.
+
+        The string representation is a formatted string with the role and content of the message.
+        The format is: "{role}: {content}".
+
+        Returns:
+            str: The string representation of the message.
+        """
+        return f"{self.role.value}: {self.content}"
+
+
+class LLMUsage(BaseModel):
+    """Represents the usage statistics of a single interaction with an LLM client.
+
+    The LLMUsage class is used to capture the usage statistics of a single interaction
+    with an LLM client. The usage statistics include the number of prompt tokens,
+    number of completion tokens, and the total number of tokens used in the interaction.
+
+    The usage statistics are used by the LLMClient implementations to track the usage
+    of the LLM clients and to provide detailed information about the usage to the
+    user.
+
+    Attributes:
+        prompt_tokens: The number of prompt tokens used in the interaction.
+        completion_tokens: The number of completion tokens used in the interaction.
+        total_tokens: The total number of tokens used in the interaction.
+    """
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class AlternativeToken(BaseModel):
+    """Alternative token with its log probability."""
+
+    token: str
+    logprob: float
+
+
+class TokenLogprob(BaseModel):
+    """Log probability information for a single token."""
+
+    token: str  # The chosen token
+    logprob: float  # Log probability of chosen token
+    top_logprobs: list[AlternativeToken] | None = None  # Alternative tokens considered
+
+
+class LogprobsData(BaseModel):
+    """Container for all logprobs information in a response."""
+
+    content: list[TokenLogprob] | None = None
+
+
+class LLMResponse(BaseModel):
+    """Represents a response from a Large Language Model (LLM) client interaction.
+
+    The `LLMResponse` class models the entire response from an LLM client after a prompt
+    is sent. It encapsulates details such as the unique identifier for the response,
+    the provider of the LLM service, the model used, the conversation messages, and the
+    usage statistics.
+
+    Attributes:
+        id (str): A unique identifier for the response. If not provided, it is auto-generated
+            based on the current timestamp, provider, model, and a random number.
+        llm_client (str): The provider of the LLM service (e.g., openai, azure).
+        model (str): The specific model used for generating the response.
+        messages (list[Message]): A list of messages representing the conversation, including
+            both the prompt messages and the response from the LLM.
+        usage (LLMUsage): An object containing the usage statistics for the interaction, such as
+            the number of tokens used.
+
+    Properties:
+        latest_response (Message): Retrieves the most recent message from the conversation.
+        content (str): Retrieves the content of the most recent message.
+
+    Methods:
+        model_post_init(__context: Any): Initializes the `id` attribute if it is not provided,
+            using the current time, provider, model, and a random number.
+    """
+
+    id: str = ""
+    llm_client: str
+    model: str
+    messages: list[Message]
+    usage: LLMUsage
+    logprobs: LogprobsData | None = None
+
+    @model_validator(mode="after")
+    def _validate_messages_not_empty(self) -> "LLMResponse":
+        if not self.messages:
+            raise ValueError(
+                "LLMResponse must have at least one message"
+            )  # No custom exceptions from exceptions.py due to circular import
+        return self
+
+    @property
+    def latest_response(self) -> Message:
+        """Returns the most recent message from the conversation.
+
+        This property returns the latest message from the conversation, which is the
+        last element in the list of messages. If the list is empty, returns None.
+
+        Returns:
+            Message: The most recent message from the conversation.
+        """
+        return self.messages[-1]
+
+    @property
+    def content(self) -> str:
+        """Returns the content of the most recent message from the conversation.
+
+        This property returns the content of the latest message from the conversation,
+        which is the last element in the list of messages. If the list is empty, returns
+        an empty string.
+
+        Returns:
+            str: The content of the most recent message from the conversation.
+        """
+        return self.latest_response.content
+
+    def model_post_init(self, __context: Any) -> None:
+        """Initializes the `id` attribute if it is not provided.
+
+        This method is a post-init hook for Pydantic models. It is called after the
+        model has been initialized with the provided data. If the `id` attribute is
+        not provided, it is initialized with a unique identifier based on the current
+        timestamp, provider, model, and a random number.
+
+        The `id` attribute is used to identify the response in logging and other
+        contexts.
+        """
+        if not self.id:
+            timestamp = int(time.time())
+            self.id = f"{self.llm_client}_{self.model}_{timestamp}_{uuid.uuid4().hex[:_RESPONSE_ID_UUID_LENGTH]}"
+
+
+class TagConfig(BaseModel):
+    """Configuration for parsing and validating XML tags from raw text.
+
+    This class defines the parsing rules for a specific XML tag, including value
+    validation, cardinality constraints, and error handling behavior when multiple
+    instances are found but only one is expected.
+
+    The parser will extract all instances of the specified XML tag from the input
+    text and apply the configured validation and cardinality rules to determine
+    the final result and any validation errors.
+
+    Attributes:
+        name: The XML tag name to search for (e.g., "user_id", "status").
+            Case-sensitive matching against opening and closing tags.
+        allowed_values: List of valid string values for this tag's content.
+            If None, any string content is accepted (freeform text).
+            If provided, tag content must exactly match one of these values
+            or it will be considered invalid.
+        cardinality: Expected number of tag instances in the input.
+            "one": Expect exactly one instance of this tag.
+            "many": Accept more than one instance of this tag.
+        multiple_handling: Behavior when cardinality="one" but multiple tags found.
+            Only applies when cardinality="one" and multiple valid tags are present.
+            "error": Generate validation error, return None for this tag.
+            "allow_both": Accept multiple values, return as list despite cardinality="one".
+            "error_if_different": Accept if all values identical, error if different.
+
+    Examples:
+        Single required field with validation:
+            >>> config = TagConfig(
+            ...     name="status",
+            ...     allowed_values=["active", "inactive", "pending"],
+            ...     cardinality="one",
+            ...     multiple_handling="error"
+            ... )
+
+        Multiple tags with restricted values:
+            >>> config = TagConfig(
+            ...     name="tags",
+            ...     allowed_values=["red", "blue", "green"],
+            ...     cardinality="many"
+            ... )
+
+        Single freeform text field that allows duplicates if identical:
+            >>> config = TagConfig(
+            ...     name="description",
+            ...     allowed_values=None,
+            ...     cardinality="one",
+            ...     multiple_handling="error_if_different"
+            ... )
+
+    Note:
+        The multiple_handling attribute is ignored when cardinality="many" since
+        multiple instances are expected in that case.
+    """
+
+    name: str
+    allowed_values: list[str] | None = None  # None = freeform
+    cardinality: Literal["one", "many"] = "many"
+    # Only matters when cardinality="one" but found multiple
+    multiple_handling: Literal["error", "allow_both", "error_if_different"] = "error"
+
+
+class ParseError(BaseModel):
+    """Structured parsing error with context."""
+
+    error_type: ErrorType
+    tag_name: str
+    message: str
+    found_values: list[str] | None = None
+    expected_values: list[str] | None = None
+
+    def __str__(self) -> str:
+        """Returns the message of the parse error."""
+        return self.message
+
+
+class ParseResult(BaseModel):
+    """Result of XML tag parsing with structured error reporting.
+
+    Provides both the successfully parsed data and detailed error information
+    for any validation or cardinality issues encountered during parsing.
+
+    Attributes:
+        data: Successfully parsed tag values. Keys are tag names, values are
+            either single strings (cardinality="one") or lists (cardinality="many").
+        errors: List of structured parsing errors with context about what failed.
+        success: True if no errors occurred during parsing.
+        partial_success: True if some data was parsed despite errors.
+    """
+
+    data: dict[str, str | list[str]]
+    errors: list[ParseError] = []
+
+    @property
+    def success(self) -> bool:
+        """True if parsing completed without any errors."""
+        return len(self.errors) == 0
+
+    @property
+    def partial_success(self) -> bool:
+        """True if some data was parsed, even if errors occurred.
+
+        Returns:
+            bool: True if there is any parsed data, even if errors occurred.
+        """
+        return len(self.data) > 0
+
+    def get_errors_by_tag(self, tag_name: str) -> list[ParseError]:
+        """Get all errors for a specific tag.
+
+        Returns:
+            list[ParseError]: List of errors that occurred when parsing the specified tag.
+        """
+        return [e for e in self.errors if e.tag_name == tag_name]
+
+    def get_errors_by_type(self, error_type: ErrorType) -> list[ParseError]:
+        """Get all errors of a specific type.
+
+        Returns:
+            list[ParseError]: List of errors with the specified type.
+        """
+        return [e for e in self.errors if e.error_type == error_type]

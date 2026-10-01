@@ -1,0 +1,42 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+node_modules/
+package-lock.json
+# Frontend lockfile is tracked so CI `npm ci` has a lockfile to install from
+!src/meta_evaluator/annotator/frontend/package-lock.json
+plan.md
+
+# Frontend build output
+src/meta_evaluator/annotator/frontend/dist/
+
+# OS generated files
+.DS_Store
+
+# MkDocs build output
+site/
+
+# Data directories
+*/examples/demo_annotations/
+
+# Ignore all examples except tracked ones
+examples/*
+!examples/rejection/
+!examples/rabakbench/run_evaluation.py
+!examples/rabakbench/run_human_annotation.py
+
+# Project directories - ignore contents but keep structure
+**/project_dir/*
+!**/project_dir/.gitkeep
+
+# Logs
+**/logs/*
+!**/logs/.gitkeep

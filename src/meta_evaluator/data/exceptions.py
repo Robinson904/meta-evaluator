@@ -1,0 +1,177 @@
+"""Placeholder file for exceptions in data."""
+
+from abc import ABC, abstractmethod
+
+
+class DataError(Exception, ABC):
+    """Base class for data-related errors.
+
+    This class mirrors the behaviour of :class:`MetaEvaluatorError` by storing the
+    human-readable message on ``self.message`` in addition to the standard
+    ``Exception`` machinery.  Keeping the attribute allows future callers to rely
+    on a uniform *attribute contract* across all custom error families.
+    """
+
+    @abstractmethod
+    def __init__(self, message: str = ""):
+        """Initialise the DataError with an optional message."""
+        self.message = message
+        super().__init__(self.message)
+
+
+class InvalidColumnNameError(DataError):
+    """Error raised when a column name is invalid."""
+
+    def __init__(self, column_name: str, error: str):
+        """Initializes the InvalidColumnNameError with the invalid column name.
+
+        Args:
+            column_name (str): The invalid column name.
+            error (str): The error message.
+        """
+        message = f"Invalid column name: '{column_name}' with error: {error}"
+        super().__init__(message)
+
+
+class EmptyColumnListError(DataError):
+    """Error raised when the list of columns is empty."""
+
+    def __init__(self, column_type_name: str):
+        """Initializes the EmptyColumnList exception with the column type name.
+
+        Args:
+            column_type_name (str): The type name of the column (e.g. "input", "output", etc.).
+        """
+        message = f"List of {column_type_name} columns is empty."
+        super().__init__(message)
+
+
+class IdColumnExistsError(DataError):
+    """Error raised when the ID column already exists in the dataset."""
+
+    def __init__(self, column_name: str):
+        """Initializes the IdColumnExistsError.
+
+        Args:
+            column_name (str): The name of the ID column.
+        """
+        message = f"Id Column with name {column_name} already exists in dataset."
+        super().__init__(message)
+
+
+class ColumnNotFoundError(DataError):
+    """Error raised when a column is not found in the dataset."""
+
+    def __init__(self, column_names: str | list[str]):
+        """Initializes the ColumnNotFoundError.
+
+        Args:
+            column_names (Union[str, list[str]]): The name of the column or list of column names.
+        """
+        if isinstance(column_names, str):
+            column_names = [column_names]
+        message = f"Column(s) {column_names} not found in dataset."
+        super().__init__(message)
+
+
+class InvalidInIDColumnError(DataError):
+    """Error raised when the ID column contains invalid values."""
+
+    def __init__(self, row_numbers: list[int], id_column_name: str):
+        """Initializes the NullExistsException.
+
+        Args:
+            row_numbers (list[int]): The row numbers where invalid values are found.
+            id_column_name (str): The name of the ID column.
+        """
+        message = f"Invalid values found in ID column {id_column_name} at row numbers: {row_numbers}."
+        super().__init__(message)
+
+
+class DuplicateInIDColumnError(DataError):
+    """Error raised when the ID column contains duplicate values."""
+
+    def __init__(self, duplicate_groups: dict[str, list[int]], id_column_name: str):
+        """Initializes the DuplicateInIDColumnError.
+
+        Args:
+            duplicate_groups (dict[str, list[int]]): Dictionary mapping duplicate ID values
+                to lists of row numbers where they appear.
+            id_column_name (str): The name of the ID column.
+        """
+        details = []
+        for value, rows in duplicate_groups.items():
+            details.append(f"  - '{value}' appears at rows {rows}")
+
+        message = (
+            f"Duplicate values found in ID column '{id_column_name}':\n"
+            + "\n".join(details)
+        )
+        super().__init__(message)
+
+
+class NullValuesInDataError(DataError):
+    """Error raised when null values are found in non-ID data columns."""
+
+    def __init__(self, null_issues: list[str]):
+        """Initializes the NullValuesInDataError.
+
+        Args:
+            null_issues (list[str]): List of detailed descriptions of null value locations
+                in the format "Column 'name' has null values at rows [x, y] (coordinates: [(x, 'name'), ...])"
+        """
+        message = f"Null values found in data columns: {'; '.join(null_issues)}"
+        super().__init__(message)
+
+
+class EmptyDataFrameError(DataError):
+    """Error raised when the DataFrame is empty."""
+
+    def __init__(self):
+        """Initializes the EmptyDataFrameError.
+
+        This exception is raised when an operation is attempted on an empty DataFrame.
+        """
+        message = "DataFrame is empty."
+        super().__init__(message)
+
+
+class DataFileError(DataError):
+    """Error raised for file-related errors during data loading."""
+
+    def __init__(self, message: str):
+        """Initializes the DataFileError with a descriptive message.
+
+        Args:
+            message (str): The error message describing the file-related issue.
+        """
+        super().__init__(message)
+
+
+class InvalidNameError(DataError):
+    """Error raised when the name of the dataset is empty."""
+
+    def __init__(self, name: str, message: str):
+        """Initializes the InvalidNameError.
+
+        This exception is raised when the name of the dataset is empty.
+        """
+        message = f"Dataset name {name} is invalid. {message}"
+        super().__init__(message)
+
+
+class NoDataLeftError(DataError):
+    """Error raised when an operation results in no remaining data."""
+
+    def __init__(self, operation: str, original_size: int = 0):
+        """Initializes the NoDataLeftError.
+
+        Args:
+            operation (str): The operation that resulted in no data (e.g., "stratified sampling", "filtering").
+            original_size (int): The original number of rows before the operation. Defaults to 0.
+        """
+        if original_size > 0:
+            message = f"No data remaining after {operation} operation (started with {original_size} rows)."
+        else:
+            message = f"No data remaining after {operation} operation."
+        super().__init__(message)

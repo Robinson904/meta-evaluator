@@ -1,0 +1,395 @@
+"""Main class for evaluation tasks."""
+
+import logging
+import re
+from collections.abc import Callable
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, create_model, field_validator, model_validator
+
+from .exceptions import TaskSchemaError
+from .serialization import (
+    MULTILABEL_FALSE_SENTINEL,
+    EvalTaskState,
+    MultiLabelSchema,
+)
+
+
+def sanitize_task_name(name: str) -> str:
+    """Convert a task name to a valid API property key and Pydantic field name.
+
+    LLM APIs require JSON schema property keys to match
+    '^[a-zA-Z0-9_.-]{1,64}$'. This function replaces any character outside
+    that set with an underscore and truncates to 64 characters.
+
+    The sanitized name is used only at the API boundary (Pydantic model fields,
+    XML tag names). Original names are always preserved in result outputs.
+
+    Args:
+        name: The original task name, which may contain spaces or special characters.
+
+    Returns:
+        str: A sanitized name safe for use as an API property key.
+    """
+    return re.sub(r"[^a-zA-Z0-9_.\-]", "_", name)[:64]
+
+
+def _make_multilabel_slot_validator(
+    task_name: str, schema: MultiLabelSchema
+) -> Callable[[type, list[str]], list[str]]:
+    """Build a field validator enforcing the multi-label slot contract.
+
+    The returned validator checks that the value is a fixed-length vector whose
+    length equals the number of declared outcomes, and that slot ``i`` holds
+    either outcome ``i``'s name or the reserved ``"FALSE"`` sentinel
+    (positional, not merely non-``"FALSE"``).
+
+    Args:
+        task_name: Original task name, for error messages.
+        schema: Multi-label schema defining canonical slot order.
+
+    Returns:
+        Callable: A validator suitable for pydantic's ``field_validator``.
+    """
+
+    def validate(cls: type, value: list[str]) -> list[str]:
+        return schema.validate_value(task_name, value)
+
+    return validate
+
+
+class EvalTask(BaseModel):
+    """Central class used throughout evaluations to define what and how to evaluate.
+
+    EvalTask configures evaluation tasks by specifying what should be evaluated
+    (task_schemas), which data columns to use, and how responses should be parsed.
+    It supports two main evaluation scenarios:
+
+    1. **Judge LLM outputs**: When judges evaluate another LLM's responses
+       - prompt_columns: contain the input to the evaluated LLM
+       - response_columns: contain the evaluated LLM's outputs
+       - task_schemas: define evaluation criteria.
+
+    2. **Judge any text content**: When judges evaluate arbitrary text
+       - response_columns: contain the text to evaluate
+       - task_schemas: define what aspects to evaluate.
+
+    Currently, this class handles
+    - classification tasks (with predefined outcomes)
+    - free-form text evaluation
+
+    Attributes:
+        task_schemas (dict[str, list[str] | MultiLabelSchema | None]): Maps task
+            names to allowed outcomes. Use a list of strings for single-select
+            classification, a MultiLabelSchema(outcomes=[...]) for multi-label
+            (pick several) tasks, or None for free-form text outputs.
+        required_tasks (Optional[list[str]]): List of task names that are required for
+            valid annotations. If None, all non-null task_schemas are required.
+        prompt_columns (Optional[list[str]]): Column names containing inputs to the
+            evaluated LLM. Only used when judging LLM outputs, None when judging text.
+        response_columns (list[str]): Column names containing text/outputs to evaluate.
+            Required for all evaluation scenarios.
+        skip_function (Callable): Function to determine if a data row should be skipped.
+        answering_method (Literal["structured", "instructor", "xml"]): Output parsing method.
+            "structured" uses Pydantic models, "instructor" uses instructor library,
+            "xml" uses XML tag parsing.
+        structured_outputs_fallback (bool): When True, automatically falls back to other
+            answering methods if the specified method is unsupported by the model.
+            When False, strictly uses the specified answering method, and raises
+            UnsupportedFormatMethodError for unsupported methods.
+            Only applies when answering_method is "structured" or "instructor".
+        annotation_prompt (str): Static prompt text shown to human annotators in the
+            annotation interface. Similar to judge prompts but simpler and one-off.
+        logger (logging.Logger): Logger instance for this task.
+
+    Raises:
+        TaskSchemaError: If task_schemas is empty or any task has fewer than 2 outcomes.
+
+    Examples:
+        >>> # Evaluate LLM responses for toxicity and relevance
+        >>> task = EvalTask(
+        ...     task_schemas={"toxicity": ["toxic", "non_toxic"], "relevance": ["relevant", "irrelevant"]},
+        ...     prompt_columns=["user_input"],  # Input to evaluated LLM
+        ...     response_columns=["llm_response"],  # LLM output to judge
+        ...     answering_method="structured",
+        ...     structured_outputs_fallback=True  # Fallback to xml if structured not supported
+        ... )
+        >>>
+        >>> # Evaluate arbitrary text summaries (free-form)
+        >>> task = EvalTask(
+        ...     task_schemas={"summary_quality": None},  # Free-form evaluation
+        ...     response_columns=["summary_text"],  # No prompt_columns needed
+        ...     answering_method="xml",
+        ...     annotation_prompt="Please evaluate the quality of this summary."
+        ... )
+    """
+
+    task_schemas: dict[str, list[str] | MultiLabelSchema | None] = Field(
+        ...,
+        description="Dictionary mapping task names to their allowed outcome values. Use a bare list for single-select classification, a MultiLabelSchema for multi-label (pick several), or None for free form text outputs.",
+    )
+    required_tasks: list[str] | None = Field(
+        default=None,
+        description="List of task names that are required for valid annotations. If None, all non-null task_schemas are required.",
+    )
+    prompt_columns: list[str] | None = Field(default=None)
+    response_columns: list[str] = Field(..., min_length=1)
+    skip_function: Callable[[dict[str, Any]], bool] = lambda x: False
+    answering_method: Literal["structured", "instructor", "xml"]
+    structured_outputs_fallback: bool = Field(
+        default=False,
+        description="When True, automatically falls back to other answering methods if the specified method is unsupported. When False, strictly uses the specified answering method, and raises an error for unsupported methods.",
+    )
+    annotation_prompt: str = Field(
+        default="Please evaluate the following response:",
+        description="If necessary, this is the prompt text shown to human annotators in the annotation interface.",
+    )
+    logger: logging.Logger = Field(
+        default_factory=lambda: logging.getLogger(f"{__name__}.EvalTask")
+    )
+
+    model_config = {
+        "arbitrary_types_allowed": True,  # Allow Logger
+    }
+
+    @model_validator(mode="after")
+    def validate_task_configuration(self) -> "EvalTask":
+        """Validate task schemas configuration.
+
+        Returns:
+            EvalTask: The validated instance
+
+        Raises:
+            TaskSchemaError: If task_schemas is empty or if any task has fewer than 2 outcomes
+        """
+        if not self.task_schemas:
+            raise TaskSchemaError(
+                "task_schema is empty. Please define your tasks and their allowed outcome values."
+            )
+
+        has_multilabel = False
+        for task_name, outcomes in self.task_schemas.items():
+            if isinstance(outcomes, MultiLabelSchema):
+                # MultiLabelSchema self-validates (>=2 outcomes, no reserved
+                # "FALSE" sentinel) on construction; nothing more to check here.
+                has_multilabel = True
+            elif outcomes is not None and len(outcomes) < 2:
+                raise TaskSchemaError(
+                    f"Please define at least 2 outcomes for task {task_name}."
+                )
+
+        # Multi-label tasks rely on JSON-based answering methods to carry the
+        # ordered vector; XML's scalar cardinality="one" path cannot preserve it.
+        if has_multilabel and self.answering_method == "xml":
+            raise TaskSchemaError(
+                "Multi-label tasks (MultiLabelSchema) require answering_method "
+                "'structured' or 'instructor'; 'xml' is not supported."
+            )
+
+        # Validate required_tasks if provided
+        if self.required_tasks is not None:
+            for required_col in self.required_tasks:
+                if required_col not in self.task_schemas:
+                    raise TaskSchemaError(
+                        f"Required column '{required_col}' not found in task_schemas. "
+                        f"Available tasks: {list(self.task_schemas.keys())}"
+                    )
+
+        return self
+
+    def get_task_names(self) -> list[str]:
+        """Get list of task names.
+
+        Returns:
+            list[str]: List of task names
+        """
+        return list(self.task_schemas.keys())
+
+    def get_required_tasks(self) -> list[str]:
+        """Get list of required task names for valid annotations.
+
+        Returns:
+            list[str]: List of required task names. If required_tasks is None,
+                returns all task names with non-null schemas.
+        """
+        if self.required_tasks is not None and len(self.required_tasks) > 0:
+            return self.required_tasks
+        else:
+            # Default behavior: all non-null schemas are required
+            return [
+                task_name
+                for task_name, schema in self.task_schemas.items()
+                if schema is not None
+            ]
+
+    def get_all_outcomes(self) -> list[str]:
+        """Get all possible outcomes across all tasks.
+
+        Returns:
+            list[str]: Flattened list of all possible outcomes from tasks with predefined outcomes
+        """
+        all_outcomes = []
+        for outcomes in self.task_schemas.values():
+            if isinstance(outcomes, MultiLabelSchema):
+                all_outcomes.extend(outcomes.outcomes)
+            elif outcomes is not None:
+                all_outcomes.extend(outcomes)
+        return list(set(all_outcomes))  # Remove duplicates
+
+    def create_task_class(self) -> type[BaseModel]:
+        """Create a new evaluation task class with Literal outcomes for predefined tasks and str for free form tasks.
+
+        Returns:
+            type[BaseModel]: A new evaluation task class with appropriate field types.
+        """
+        self.logger.info(
+            f"Creating task class with {len(self.task_schemas)} tasks: {list(self.task_schemas.keys())}"
+        )
+
+        model_fields: dict[str, Any] = {}
+        # Per-field validators for multi-label tasks, attached to the generated
+        # model so slot alignment is enforced at parse time.
+        model_validators: dict[str, Any] = {}
+
+        # Create one field per task, using sanitized names as Pydantic field keys so
+        # that the generated JSON schema is accepted by LLM APIs (e.g. Anthropic requires
+        # property keys matching '^[a-zA-Z0-9_.-]{1,64}$'). Original names are preserved
+        # in result outputs via the reverse mapping in _extract_outcomes_from_json /
+        # _extract_outcomes_from_parse_result.
+        for task_name, outcomes in self.task_schemas.items():
+            safe_name = sanitize_task_name(task_name)
+            if outcomes is None:
+                # Free form text output
+                model_fields[safe_name] = (
+                    str,
+                    Field(
+                        ...,
+                        description=f"The free form text output for {task_name}",
+                    ),
+                )
+            elif isinstance(outcomes, MultiLabelSchema):
+                # Multi-label: a fixed-length ordered vector. Each slot holds the
+                # outcome's own name (selected) or the "FALSE" sentinel (not
+                # selected). Typed as list[Literal[*outcomes, "FALSE"]] with a
+                # validator enforcing length and per-slot (positional) membership.
+                slot_outcomes = outcomes.outcomes
+                allowed_values = tuple([*slot_outcomes, MULTILABEL_FALSE_SENTINEL])
+                model_fields[safe_name] = (
+                    list[Literal[allowed_values]],  # type: ignore[valid-type]
+                    Field(
+                        ...,
+                        description=(
+                            f"The multi-label outcome vector for {task_name}. "
+                            f"A list of length {len(slot_outcomes)} where slot i is "
+                            f"either the i-th outcome name or '{MULTILABEL_FALSE_SENTINEL}'. "
+                            f"Outcomes in order: {', '.join(slot_outcomes)}"
+                        ),
+                    ),
+                )
+                model_validators[f"validate_{safe_name}"] = field_validator(safe_name)(
+                    _make_multilabel_slot_validator(task_name, outcomes)
+                )
+            else:
+                # Predefined outcomes using Literal
+                outcomes_literal = Literal[tuple(outcomes)]
+                model_fields[safe_name] = (
+                    outcomes_literal,
+                    Field(
+                        ...,
+                        description=f"The outcome for {task_name}. Must be one of: {', '.join(outcomes)}",
+                    ),
+                )
+
+        DynamicTaskOutcome = create_model(
+            "MultiTaskOutcomeRecord",
+            **model_fields,
+            __validators__=model_validators,
+            __base__=BaseModel,
+        )
+
+        return DynamicTaskOutcome
+
+    def get_fallback_sequence(self) -> list[str]:
+        """Get the sequence of answering methods to try with fallback enabled.
+
+        Returns the prioritized list of methods to attempt when fallback is enabled.
+        The original method is tried first, followed by alternatives in order of preference.
+
+        Returns:
+            list[str]: Ordered list of answering methods to try
+        """
+        if not self.structured_outputs_fallback:
+            return [self.answering_method]
+
+        # Define fallback sequences for each method
+        fallback_sequences = {
+            "structured": ["structured", "instructor", "xml"],
+            "instructor": ["instructor", "structured", "xml"],
+            "xml": ["xml"],  # XML doesn't need fallback as it's most compatible
+        }
+
+        sequence = fallback_sequences.get(
+            self.answering_method, [self.answering_method]
+        )
+
+        # Multi-label tasks cannot route through XML's scalar path, so exclude it
+        # from the fallback sequence. Construction already rejects a direct
+        # answering_method="xml" alongside a MultiLabelSchema.
+        if self._has_multilabel_task():
+            sequence = [method for method in sequence if method != "xml"]
+
+        return sequence
+
+    def _has_multilabel_task(self) -> bool:
+        """Whether any task in this EvalTask is multi-label.
+
+        Returns:
+            bool: True if at least one task schema is a MultiLabelSchema.
+        """
+        return any(
+            isinstance(schema, MultiLabelSchema)
+            for schema in self.task_schemas.values()
+        )
+
+    def serialize(self) -> EvalTaskState:
+        """Serialize the EvalTask to metadata (excluding skip_function).
+
+        Returns:
+            EvalTaskState: Serialized state for EvalTask.
+        """
+        self.logger.info(f"Serializing EvalTask with {len(self.task_schemas)} tasks")
+
+        return EvalTaskState(
+            task_schemas=self.task_schemas,
+            required_tasks=self.required_tasks,
+            prompt_columns=self.prompt_columns,
+            response_columns=self.response_columns,
+            answering_method=self.answering_method,
+            structured_outputs_fallback=self.structured_outputs_fallback,
+            annotation_prompt=self.annotation_prompt,
+        )
+
+    @classmethod
+    def deserialize(cls, state: EvalTaskState) -> "EvalTask":
+        """Deserialize EvalTask from state.
+
+        Args:
+            state: Serialized state for EvalTask.
+
+        Returns:
+            EvalTask: Reconstructed EvalTask instance.
+        """
+        return cls(
+            task_schemas=state.task_schemas,
+            required_tasks=state.required_tasks,
+            prompt_columns=state.prompt_columns,
+            response_columns=state.response_columns,
+            answering_method=state.answering_method,
+            structured_outputs_fallback=getattr(
+                state, "structured_outputs_fallback", False
+            ),
+            annotation_prompt=getattr(
+                state, "annotation_prompt", "Please evaluate the following response:"
+            ),
+            # skip_function must be set manually or defaulted
+        )

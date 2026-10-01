@@ -1,0 +1,97 @@
+[project]
+name = "meta-evaluator"
+dynamic = ["version"]
+description = "Evaluate LLM-as-a-Judge systems by measuring alignment between judge outputs and human annotations"
+readme = "README.md"
+authors = [
+    { name = "aipractice" }
+]
+license = "MIT"
+requires-python = ">=3.13"
+keywords = ["llm", "evaluation", "judge", "alignment", "meta-evaluation", "nlp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "beartype>=0.21.0",
+    "boto3>=1.40.10",
+    "botocore>=1.40.10",
+    "google-auth>=2.40.3",
+    "instructor>=1.8.3",
+    "litellm>=1.65.1",
+    "openai>=1.82.1",
+    "polars>=1.30.0",
+    "pydantic>=2.11.5",
+    "python-dotenv>=1.1.0",
+    "pyyaml>=6.0.0",
+    "scikit-learn>=1.5.0",
+    "scipy>=1.9.0",
+    "tqdm>=4.66.0",
+    "matplotlib>=3.5.0",
+]
+
+[project.optional-dependencies]
+docs = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.6.17",
+]
+ui = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+]
+all = [
+    "meta-evaluator[docs,ui]",
+]
+
+[project.urls]
+Homepage = "https://github.com/govtech-responsibleai/meta-evaluator"
+Repository = "https://github.com/govtech-responsibleai/meta-evaluator"
+Issues = "https://github.com/govtech-responsibleai/meta-evaluator/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/meta_evaluator/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+artifacts = [
+  "src/meta_evaluator/annotator/frontend/dist/**",
+]
+
+[tool.hatch.build.targets.wheel]
+artifacts = [
+  "src/meta_evaluator/annotator/frontend/dist/**",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.2.0",
+    "pyright>=1.1.401",
+    "pytest>=8.3.5",
+    "pytest-asyncio>=1.1.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.11.11",
+]
+
+[tool.ruff.lint]
+extend-select = ["D", "DOC", "I"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pyright]
+exclude = ["examples"]
+include = ["src", "tests", "examples/rejection", "examples/rabakbench"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (may be slow or require external services)"
+]

@@ -1,0 +1,68 @@
+# Project Information
+site_name: MetaEvaluator Docs
+site_description: Documentation for MetaEvaluator
+site_author: GovTech AI Practice
+docs_dir: docs
+
+# Theme Configuration
+theme:
+  name: material
+  language: en
+  palette:
+    primary: white
+    accent: custom
+  features:
+    - navigation.expand 
+    - navigation.tabs
+    - content.last_updated  
+    - content.code.copy
+  font:
+    text: Lato
+
+# Markdown Extensions
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.blocks.caption
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - pymdownx.blocks.caption
+  - def_list
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+    
+# Navigation
+nav:
+  - Home: index.md
+  - Usage:
+    - Tutorial: tutorial.md
+    - Annotation Guide:
+      - Setting up the annotation platform: annotation_guide/annotation.md
+      - Deployment options: annotation_guide/deployment.md
+    - Evaluation Guides:
+      - MetaEvaluator: guides/base.md
+      - Defining the evaluation task: guides/evaltask.md
+      - Loading the evaluation data: guides/evaldata.md
+      - Loading judges: guides/judges_load.md
+      - Running judges: guides/judges_run.md
+    - Scoring Guides:
+      - Judge/Annotation results: guides/results.md
+      - Scoring and Metrics: guides/scoring.md
+
+# Plugins
+plugins:
+  - search
+
+extra_css:
+  - stylesheets/extra.css

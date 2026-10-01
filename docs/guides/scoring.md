@@ -1,0 +1,798 @@
+# Scoring and Metrics
+
+Configure and use alignment metrics to compare judge evaluations with human annotations.
+
+## Quick Setup
+
+=== "Single Metric"
+
+    ```python linenums="1" hl_lines="8-17"
+    from meta_evaluator import MetaEvaluator
+    from meta_evaluator.scores import MetricConfig, MetricsConfig
+    from meta_evaluator.scores.metrics import ClassificationScorer
+
+    evaluator = MetaEvaluator(project_dir="my_project", load=True)
+
+    # Configure single metric
+    config = MetricsConfig(
+        metrics=[
+            MetricConfig(
+                scorer=ClassificationScorer(metric="accuracy"),
+                task_names=["rejection"],
+                task_strategy="single", # 'single' or 'multitask' (aggregation across task_names)
+                annotator_aggregation="individual_average",  # Default
+                display_name="rejection_accuracy",  # Optional: custom column name
+            ),
+        ]
+    )
+
+    # Add metrics configuration and run comparison
+    evaluator.add_metrics_config(config)
+    evaluator.compare_async()
+    ```
+
+=== "Multiple Metrics"
+
+    ```python linenums="1" hl_lines="11-52"
+    from meta_evaluator.scores.metrics import (
+        ClassificationScorer,
+        AltTestScorer,
+        CohensKappaScorer,
+        TextSimilarityScorer,
+    )
+    alt_test_scorer = AltTestScorer(multiplicative_epsilon=True)
+    cohens_kappa_scorer = CohensKappaScorer()
+    text_similarity_scorer = TextSimilarityScorer()
+    
+    # Assumes a native multi-label task "harm_types" declared with MultiLabelSchema
+    config = MetricsConfig(
+        metrics=[
+            # Native multi-label task: one column, scored with task_strategy="single"
+            MetricConfig(
+                scorer=ClassificationScorer(metric="f1", average="macro"),
+                task_names=["harm_types"],
+                task_strategy="single",
+                annotator_aggregation="individual_average",
+            ),
+            # AltTest scores the native name vector unchanged
+            MetricConfig(
+                scorer=alt_test_scorer,
+                task_names=["harm_types"],
+                task_strategy="single",
+                annotator_aggregation="individual_average",
+            ),
+            # A separate single-select task
+            MetricConfig(
+                scorer=cohens_kappa_scorer,
+                task_names=["rejection"],
+                task_strategy="single",
+                annotator_aggregation="individual_average",
+            ),
+            MetricConfig(
+                scorer=text_similarity_scorer,
+                task_names=["explanation"],
+                task_strategy="single",
+                annotator_aggregation="majority_vote",  # Example using majority vote
+            ),
+        ]
+    )
+
+    # Add metrics configuration and run comparison
+    evaluator.add_metrics_config(config)
+    evaluator.compare_async()
+    ```
+## Available Scorers
+
+=== "Classification Metrics"
+
+    ClassificationScorer supports 4 different metrics: accuracy, F1, precision, and recall. Select the metric at initialization.
+
+    ```python linenums="1"
+    from meta_evaluator.scores.metrics import ClassificationScorer
+
+    # Accuracy Score
+    accuracy_scorer = ClassificationScorer(metric="accuracy")
+
+    # F1 Score
+    f1_scorer = ClassificationScorer(metric="f1", pos_label="accurate", average="binary")
+
+    # Precision Score
+    precision_scorer = ClassificationScorer(metric="precision", pos_label="accurate", average="binary")
+
+    # Recall Score
+    recall_scorer = ClassificationScorer(metric="recall", pos_label="accurate", average="binary")
+
+    config = MetricConfig(
+        scorer=accuracy_scorer,
+        task_names=["classification_field"],
+        task_strategy="single",
+        annotator_aggregation="individual_average",
+    )
+    ```
+
+    - **Purpose**: Classification metrics between judge and human annotations
+    - **Requirements**: 1 human annotator minimum
+    - **Output**: Metric score (0-1)
+    - **Parameters**:
+        - `metric`: "accuracy", "f1", "precision", or "recall", default='accuracy'.
+        - `pos_label`: For F1/precision/recall, the label to treat as positive (for binary classification), default=1. See sklearn.metrics documentation.
+        - `average`: For F1/precision/recall, averaging strategy, default='binary'. See sklearn.metrics documentation.
+
+    **Sample Results:**
+
+    ```json
+    {
+      "judge_id": "gpt_4_judge",
+      "scorer_name": "classification_f1",
+      "task_strategy": "single",
+      "task_name": "rejection",
+      "score": 0.87,
+      "metadata": {
+        "pos_label": "accurate",
+        "average": "binary"
+      }
+    }
+    ```
+
+=== "Cohen's Kappa"
+
+    ```python linenums="1"
+    from meta_evaluator.scores.metrics import CohensKappaScorer
+    
+    kappa_scorer = CohensKappaScorer()
+    
+    config = MetricConfig(
+        scorer=kappa_scorer,
+        task_names=["classification_field"],
+        task_strategy="single",
+        annotator_aggregation="individual_average",
+    )
+    ```
+
+    - **Purpose**: Inter-rater agreement accounting for chance
+    - **Requirements**: 2 human annotators minimum
+    - **Output**: Kappa coefficient (-1 to 1)
+    
+    !!! note "Kappa Interpretation"
+        | Kappa Range | Interpretation |
+        |-------------|----------------|
+        | < 0.00      | Poor           |
+        | 0.00-0.20   | Slight         |  
+        | 0.21-0.40   | Fair           |
+        | 0.41-0.60   | Moderate       |
+        | 0.61-0.80   | Substantial    |
+        | 0.81-1.00   | Almost Perfect |
+
+    **Sample Results:**
+
+    ```json
+    {
+      "judge_id": "claude_judge",
+      "scorer_name": "cohens_kappa", 
+      "task_strategy": "single",
+      "task_name": "rejection",
+      "score": 0.72,
+      "interpretation": "substantial",
+      "metadata": {
+        "observed_agreement": 0.85,
+        "expected_agreement": 0.42,
+        "human_annotators": 3
+      }
+    }
+    ```
+
+
+=== "Alt-Test"
+
+    ```python linenums="1"
+    from meta_evaluator.scores.metrics import AltTestScorer
+    
+    alt_test_scorer = AltTestScorer(multiplicative_epsilon=True) # Set multiplicative_epsilon=True to modify the original hypothesis.
+    
+    config = MetricConfig(
+        scorer=alt_test_scorer,
+        task_names=["classification_field"],
+        task_strategy="single",
+        annotator_aggregation="individual_average",
+    )
+    ```
+
+    - **Purpose**: Alt-Test
+    - **Requirements**: 3 human annotators minimum, and minimally 30 instances per human. (For statistical significance.)
+      ```
+      # To configure min_instances_per_human, run
+      alt_test_scorer.min_instances_per_human = 30
+      ```
+    - **Output**: Winning Rates across different epsilon values, Advantage Probability, and Human Advantage Probabilities.
+
+    !!! note
+        Alt-Test is a leave-one-annotator-out hypothesis test that measures whether an LLM judge agrees with the remaining human consensus at least as well as the left-out human does.
+
+    **Sample Results:**
+
+    ```json
+    {
+      "judge_id": "anthropic_claude_3_5_haiku_judge",
+      "scorer_name": "alt_test",
+      "task_strategy": "single", 
+      "task_name": "rejection",
+      "scores": {
+        "winning_rate": {
+          "0.00": 0.0,
+          "0.05": 0.0,
+          "0.10": 0.0,
+          "0.15": 0.0,
+          "0.20": 0.0,
+          "0.25": 0.0,
+          "0.30": 0.0
+        },
+        "advantage_probability": 0.9
+      },
+      "metadata": {
+        "human_advantage_probabilities": {
+          "person_1": [0.9, 1.0],
+          "person_2": [0.9, 0.8], 
+          "person_3": [0.9, 1.0]
+        },
+        "scoring_function": "accuracy",
+        "epsilon": 0.2,
+        "multiplicative_epsilon": false,
+        "min_instances_per_human": 10,
+        "ground_truth_method": "alt_test_procedure"
+      }
+    }
+    ```
+
+=== "Text Similarity"
+
+    ```python linenums="1"
+    from meta_evaluator.scores.metrics import TextSimilarityScorer
+    
+    text_scorer = TextSimilarityScorer()
+    
+    config = MetricConfig(
+        scorer=text_scorer,
+        task_names=["explanation"],
+        task_strategy="single",
+        annotator_aggregation="majority_vote",  # Example using majority vote
+    )
+    ```
+
+    - **Purpose**: String similarity for text responses. Uses SequenceMatcher.
+    - **Requirements**: 1 human annotator minimum
+    - **Output**: Similarity scores (0-1)
+
+    !!! note
+        SequenceMatcher uses the Ratcliff-Obershelp pattern matching algorithm, which recursively looks for the longest contiguous matching subsequence between the two sequences, and calculate similarity ratio using the formula: 
+        `(2 × total_matching_characters) / (len(A) + len(B))`
+
+    **Sample Results:**
+
+    ```json
+    {
+      "judge_id": "gpt_4_judge",
+      "scorer_name": "text_similarity",
+      "task_strategy": "single", 
+      "task_name": "explanation",
+      "score": 0.76,
+      "metadata": {
+        "mean_similarity": 0.76,
+        "median_similarity": 0.78,
+        "std_similarity": 0.12,
+        "total_comparisons": 100
+      }
+    }
+    ```
+
+=== "Semantic Similarity"
+
+    ```python linenums="1"
+    from meta_evaluator.scores.metrics import SemanticSimilarityScorer
+    
+    semantic_scorer = SemanticSimilarityScorer()
+    
+    config = MetricConfig(
+        scorer=semantic_scorer,
+        task_names=["explanation"],
+        task_strategy="single",
+        annotator_aggregation="individual_average",
+    )
+    ```
+
+    - **Purpose**: Semantic similarity for text responses using OpenAI embeddings.
+    - **Requirements**: 
+        - 1 human annotator minimum
+        - OpenAI API key (set `OPENAI_API_KEY` environment variable)
+    - **Output**: Cosine similarity scores (0-1)
+
+    !!! note
+        Uses OpenAI's text embedding models to compute embeddings and calculate cosine similarity between judge and human text responses. Captures semantic meaning rather than just string matching.
+        
+        ```bash
+        export OPENAI_API_KEY="your-openai-api-key"
+        ```
+    
+    **Sample Results:**
+
+
+    ```json
+    {
+      "judge_id": "claude_judge",
+      "scorer_name": "semantic_similarity",
+      "task_strategy": "single", 
+      "task_name": "explanation",
+      "score": 0.84,
+      "metadata": {
+        "mean_similarity": 0.84,
+        "median_similarity": 0.86,
+        "std_similarity": 0.08,
+        "total_comparisons": 100,
+        "embedding_model": "sentence-transformers/all-MiniLM-L6-v2"
+      }
+    }
+    ```
+
+!!! note "Score Ranges"
+    - **Classification**: 0-1 (higher is better)
+    - **Cohen's Kappa**: -1 to 1 (higher is better, accounts for chance) 
+    - **Text/Semantic Similarity**: 0-1 (higher is better, semantic similarity)
+    - **Alt-Test**: Winning rates across epsilon values, advantage probabilities (0-1)
+
+
+## Arguments
+### Task Configuration Types (`task_strategy`)
+
+`task_strategy` controls **how a scorer's results are aggregated across the `task_names` in one `MetricConfig`** — it is about aggregation, *not* about the shape of any individual task's value:
+
+- **`"single"`**: score **one** task on its own.
+- **`"multitask"`**: score **several** tasks with the same scorer, then average their scores into one result.
+
+This is independent of whether a task's value is single-select, free-form, or multi-label. In particular, a native [multi-label task](evaltask.md#multi-label-tasks-pick-several) is a single column and is scored with `task_strategy="single"` — its "pick several" nature lives in the `EvalTask` schema, not in `task_strategy`. See [Scoring multi-label tasks](#scoring-multi-label-tasks) below.
+
+!!! important "Task Count Requirements"
+    - **`"single"`**: Use only when `task_names` contains **exactly 1 task**
+    - **`"multitask"`**: Use only when `task_names` contains **2 or more tasks**
+
+!!! warning "`task_strategy="multilabel"` is deprecated"
+    A third value, `task_strategy="multilabel"`, still exists: it melts **multiple single-select task columns** into one aligned vector at scoring time. It is **deprecated** — declare a native [`MultiLabelSchema`](evaltask.md#multi-label-tasks-pick-several) task instead (scored with `task_strategy="single"`). It still functions in the current version, but will be removed in a future release. See [The legacy `multilabel` strategy](#the-legacy-multilabel-strategy-deprecated).
+
+=== "Single Label (Single Task)"
+    
+    Evaluate one classification task:
+
+    ```python linenums="1" hl_lines="6 7"
+    # Single binary classification task
+    config = MetricsConfig(
+        metrics=[
+            MetricConfig(
+                scorer=ClassificationScorer(metric="accuracy"),
+                task_names=["rejection"],  # Single task name
+                task_strategy="single",  # Required: "single" for single task
+                annotator_aggregation="individual_average",
+            ),
+        ]
+    )
+    ```
+
+    !!! note "Single Task Behavior"
+        - Single score for the specified task
+        - **Required**: Exactly 1 task in `task_names` list
+        - Use this when evaluating one task independently
+
+=== "Multi-Task (Multiple Single Labels)"
+    
+    Apply the same scorer to multiple separate tasks:
+
+    ```python linenums="1" hl_lines="6 7"
+    # Same scorer applied to each task separately
+    config = MetricsConfig(
+        metrics=[
+            MetricConfig(
+                scorer=ClassificationScorer(metric="accuracy"),
+                task_names=["helpful", "harmless", "honest"],  # Multiple tasks
+                task_strategy="multitask",  # Required: "multitask" for multiple separate tasks
+                annotator_aggregation="majority_vote",  # Example using majority vote
+            ),
+        ]
+    )
+    ```
+
+    !!! note "Multi-Task Behavior"
+        - **Required**: 2 or more tasks in `task_names` list
+        - **Same scorer applied to each task individually**
+        - **Result**: Aggregated score across all tasks
+        - For different scorers on different tasks, create separate `MetricConfig` entries
+
+**Example with different scorers per task:**
+```python linenums="1" hl_lines="7 13"
+config = MetricsConfig(
+    metrics=[
+        # Accuracy for a single classification task
+        MetricConfig(
+            scorer=ClassificationScorer(metric="accuracy"),
+            task_names=["helpful"],
+            task_strategy="single",
+            annotator_aggregation="majority_vote",
+        ),
+        # Same scorer applied across several tasks, then averaged
+        MetricConfig(
+            scorer=ClassificationScorer(metric="accuracy"),
+            task_names=["helpful", "harmless", "honest"],
+            task_strategy="multitask",
+            annotator_aggregation="individual_average",
+        ),
+    ]
+)
+```
+
+### Scoring multi-label tasks
+
+A native [multi-label task](evaltask.md#multi-label-tasks-pick-several) (declared with `MultiLabelSchema`) is **one column**, so it is scored with `task_strategy="single"`. The recommended scorer is `ClassificationScorer`:
+
+```python linenums="1" hl_lines="7 8"
+from meta_evaluator.scores.metrics import ClassificationScorer
+
+config = MetricsConfig(
+    metrics=[
+        MetricConfig(
+            scorer=ClassificationScorer(metric="f1", average="macro"),  # or average="samples"
+            task_names=["harm_types"],   # ONE native multi-label task
+            task_strategy="single",
+            annotator_aggregation="individual_average",
+        ),
+    ]
+)
+```
+
+- The name-vector is **binarized positionally** (slot `i` → `1` if it holds outcome `i`'s name, `0` if `"FALSE"`) into a per-slot indicator vector, then scored.
+- For F1/precision/recall, `ClassificationScorer.average` **must** be `"macro"` (per-label, recommended) or `"samples"` (per-item overlap). The global default `"binary"` is rejected with a clear error. Accuracy ignores `average`. A mixed single-class + multi-label `multitask` config must use `"macro"`.
+- **`AltTestScorer`** scores the native **name** vector unchanged (it is *not* binarized; its Jaccard similarity auto-routes on list-valued labels).
+- **`CohensKappaScorer` does not support multi-label tasks** and raises a clear error — κ has no valid averaging axis over a sparse multi-label vector. Use `ClassificationScorer` or `AltTestScorer` instead.
+
+### The legacy `multilabel` strategy (deprecated)
+
+!!! warning "Deprecated"
+    `task_strategy="multilabel"` melts **N separate single-select task columns** into one aligned vector at scoring time. It predates the native multi-label task type and is **deprecated**. Prefer declaring a single [`MultiLabelSchema`](evaltask.md#multi-label-tasks-pick-several) task and scoring it with `task_strategy="single"` (above). The legacy strategy still functions in the current version but will be removed in a future release.
+
+Migration — replace N single-select tasks combined by the melt:
+
+```python
+# Before (deprecated): six single-select tasks melted at scoring time
+# task_schemas: {"hateful": ["FALSE","hateful"], "insults": ["FALSE","insults"], ...}
+MetricConfig(scorer=alt_test_scorer,
+             task_names=["hateful", "insults", "sexual"],
+             task_strategy="multilabel")
+
+# After: one native multi-label task, scored as a single column
+# task_schemas: {"harm_types": MultiLabelSchema(outcomes=["hateful","insults","sexual"])}
+MetricConfig(scorer=alt_test_scorer,
+             task_names=["harm_types"],
+             task_strategy="single")
+```
+
+### Annotator Aggregation (`annotator_aggregation`)
+
+Control how multiple human annotations are aggregated before comparison with judge results.
+
+=== "Individual Average (Default)"
+
+    Compare judge vs each human separately, then average the scores:
+
+    ```python
+    MetricConfig(
+        scorer=ClassificationScorer(metric="accuracy"),
+        task_names=["rejection"],
+        task_strategy="single",
+        annotator_aggregation="individual_average"  # Default
+    )
+    ```
+
+    **How it works:**
+    - Judge vs Human 1: Calculate metric score
+    - Judge vs Human 2: Calculate metric score
+    - Judge vs Human 3: Calculate metric score
+    - **Final Score**: Average of all individual scores
+
+=== "Majority Vote"
+
+    Aggregate humans first using majority vote, then compare judge vs consensus:
+
+    ```python
+    MetricConfig(
+        scorer=ClassificationScorer(metric="accuracy"),
+        task_names=["rejection"],
+        task_strategy="single",
+        annotator_aggregation="majority_vote"
+    )
+    ```
+
+    **How it works:**
+    - Find consensus among human annotators first
+    - Compare judge predictions with consensus
+    - Implementation varies by metric type (see support table below)
+
+
+### Custom Column Names (`display_name`)
+
+Override auto-generated column names (e.g., `classification_accuracy_1tasks_5d6db9a1_single`) with custom names:
+
+```python linenums="1" hl_lines="7 13"
+config = MetricsConfig(
+    metrics=[
+        MetricConfig(
+            scorer=ClassificationScorer(metric="accuracy"),
+            task_names=["accuracy"],
+            task_strategy="single",
+            display_name="accuracy_score"  # Custom column name
+        ),
+        MetricConfig(
+            scorer=ClassificationScorer(metric="accuracy"),
+            task_names=["groundedness"],
+            task_strategy="single",
+            display_name="groundedness_score"
+        ),
+    ]
+)
+```
+
+**Metric Support Table**
+
+| Metric | individual_average | majority_vote |
+|--------|-------------------|---------------|
+| **ClassificationScorer** | :material-check: | :material-check: Per-position majority for multi-label vectors, alphabetical tie-breaking |
+| **TextSimilarityScorer** | :material-check: | :material-check: Best-match approach: highest similarity human per sample |
+| **SemanticSimilarityScorer** | :material-check: | :material-check: Best-match approach: highest similarity human per sample |
+| **CohensKappaScorer** | :material-check: | :material-close: Logs warning, falls back to individual_average (agreement metric) |
+| **AltTestScorer** | :material-check: | :material-close: Logs warning, falls back to individual_average (agreement metric) |
+
+**Why agreement metrics don't support majority_vote:**
+Inter-annotator agreement metrics measure disagreement between individual humans. Majority vote eliminates this disagreement information, making the metrics less meaningful.
+
+## Results Output
+
+### Individual Metric Results
+
+Detailed scores and charts are saved to individual metric directories in your project:
+
+```
+my_project/
+└── scores/
+    ├── classification_accuracy/
+    │   └── classification_accuracy_1tasks_22e76eaf_rejection_accuracy/
+    │       ├── accuracy_scores.png
+    │       ├── judge_1_result.json
+    │       └── judge_2_result.json
+    ├── cohens_kappa/
+    │   └── cohens_kappa_1tasks_22e76eaf_rejection_agreement/
+    │       ├── cohens_kappa_scores.png
+    │       ├── judge_1_result.json
+    │       └── judge_2_result.json
+    ├── alt_test/
+    │   └── alt_test_3tasks_22e76eaf_safety_significance/
+    │       ├── aggregate_advantage_probabilities.png
+    │       ├── aggregate_human_vs_llm_advantage.png
+    │       ├── aggregate_winning_rates.png
+    │       ├── judge_1_result.json
+    │       └── judge_2_result.json
+    ├── text_similarity/
+    │   └── text_similarity_1tasks_74d08617_explanation_quality/
+    │       ├── text_similarity_scores.png
+    │       ├── judge_1_result.json
+    │       └── judge_2_result.json
+    ├── score_report.csv
+    └── score_report.html
+```
+
+!!! note "Chart Styling"
+    Basic, shared plots use default matplotlib styling. Users may customize their chart theme by using Matplotlib's style sheets and rcParams.
+
+**Sample Charts:**
+
+`accuracy_scores.png` (ClassificationScorer) |  `aggregate_winning_rates.png` (AltTestScorer)
+:-------------------------:|:-------------------------:
+![Score Report HTML Table](../assets/example_accuracy_scores.png)|![Score Report HTML Table](../assets/example_aggregate_winning_rates.png)
+
+
+### Summary Reports
+
+You can generate summary reports that aggregate all metrics across all judges in a single view.
+
+```python linenums="1"
+# After running evaluations and configuring metric configs
+evaluator.add_metrics_config(config)
+evaluator.compare_async()
+
+# Save to files
+evaluator.score_report.save("score_report.html", format="html")  # Interactive HTML with highlighting
+evaluator.score_report.save("score_report.csv", format="csv")    # CSV for analysis
+
+# Print to console
+evaluator.score_report.print()
+```
+
+Summary reports are saved to the scores directory:
+
+```
+my_project/
+└── scores/
+    ├── score_report.html          # Interactive HTML table with best score highlighting
+    ├── score_report.csv           # CSV format for analysis/Excel
+    ├── classification_accuracy/   # Detailed accuracy results...
+    ├── cohens_kappa/              # Detailed kappa results...
+    ├── alt_test/                  # Detailed alt-test results...
+    └── text_similarity/           # Detailed similarity results...
+```
+
+**Sample Console Output:**
+
+![Score Report CLI Output](../assets/example_score_report_console.png)
+
+
+**Sample HTML Report:**
+
+![Score Report HTML Table](../assets/example_score_report_html.png)
+
+---
+
+## Custom Scorer
+
+You may implement your own evaluation metrics.
+
+Here is a concrete example of custom metric that **count how many times judge has more "A"s than human** in it's response.
+
+```python linenums="1"
+from meta_evaluator.scores.base_scorer import BaseScorer
+from meta_evaluator.scores.base_scoring_result import BaseScoringResult
+from meta_evaluator.scores.enums import TaskAggregationMode
+from typing import Any, List
+import polars as pl
+
+class MyCustomScorer(BaseScorer):
+    def __init__(self):
+        super().__init__(scorer_name="my_custom_scorer")
+    
+    def can_score_task(self, sample_label: Any) -> bool:
+        """Determine if this scorer can handle the given data type.
+        
+        Args:
+            sample_label: Sample of the actual data that will be scored
+            
+        Returns:
+            True if scorer can handle this data type
+        """
+        # This example only works with a str or a list of str.
+        if isinstance(sample_label, str):
+            return True
+        elif isinstance(sample_label, list):
+            # Check if list contains str
+            if len(sample_label) > 0:
+                return isinstance(sample_label[0], str)
+            return True  # Empty list is acceptable
+        else:
+            return False
+    
+    async def compute_score_async(
+        self,
+        judge_data: pl.DataFrame,
+        human_data: pl.DataFrame, 
+        task_name: str,
+        judge_id: str,
+        aggregation_mode: TaskAggregationMode,
+    ) -> BaseScoringResult:
+        """Compute alignment score between a single judge and all human data.
+        
+        Args:
+            judge_data: DataFrame with 1 judge outcomes (columns: original_id, label)
+            human_data: DataFrame with human outcomes (columns: original_id, human_id, label)
+            task_name: Name of the task being scored
+            judge_id: ID of the judge being scored
+            aggregation_mode: How tasks were aggregated.
+            
+        Returns:
+            Scoring result object
+        """
+        # Join judge and human data on original_id
+        comparison_df = judge_data.join(human_data, on="original_id", how="inner")
+        
+        if comparison_df.is_empty():
+            score = 0.0
+            num_comparisons = 0
+            failed_comparisons = 1
+        else:
+            judge_wins = []
+            num_comparisons = 0
+            failed_comparisons = 0
+            
+            # Compare judge vs each human annotator
+            humans = comparison_df["human_id"].unique()
+            for human_id in humans:
+                try:
+                    comparison_subset = comparison_df.filter(
+                        pl.col("human_id") == human_id
+                    )
+                    judge_texts = comparison_subset["label"].to_list()
+                    human_texts = comparison_subset["label_right"].to_list()
+                    
+                    judge_more_A = 0
+                    human_more_A = 0
+                    for judge_text, human_text in zip(judge_texts, human_texts):
+                        judge_count = str(judge_text).count("A")
+                        human_count = str(human_text).count("A")
+                        if judge_count > human_count:
+                            judge_more_A += 1
+                        else:
+                            human_more_A += 1
+                    
+                    # Judge "wins" if they have more A's in more instances
+                    if judge_more_A > human_more_A:
+                        judge_wins.append(1)
+                    else:
+                        judge_wins.append(0)
+                    
+                    num_comparisons += 1
+                    
+                except Exception as e:
+                    self.logger.error(f"Error computing score: {e}")
+                    failed_comparisons += 1
+                    continue
+            
+            # Calculate win rate
+            score = sum(judge_wins) / len(judge_wins) if len(judge_wins) > 0 else 0.0
+            num_comparisons = len(comparison_df)
+        
+        return BaseScoringResult(
+            scorer_name=self.scorer_name,
+            task_name=task_name,
+            judge_id=judge_id,
+            scores={"win_rate": score},
+            metadata={
+                "human_annotators": len(comparison_df["human_id"].unique()) if not comparison_df.is_empty() else 0
+            },
+            aggregation_mode=aggregation_mode,
+            num_comparisons=num_comparisons,
+            failed_comparisons=failed_comparisons,
+        )
+    
+    def aggregate_results(
+        self,
+        results: List[BaseScoringResult],
+        scores_dir: str, 
+        unique_name: str = ""
+    ) -> None:
+        """Optional: Takes in all judge results and generate aggregate visualizations.
+        
+        Args:
+            results: List of scoring results
+            scores_dir: Directory to save plots
+            unique_name: Unique identifier for this configuration
+        """
+        # Optional: Create custom visualizations
+        # self._create_custom_plots(results, scores_dir, unique_name)
+        pass
+        
+
+# Usage
+custom_scorer = MyCustomScorer()
+
+config = MetricConfig(
+    scorer=custom_scorer,
+    task_names=["text"],
+    task_strategy="single",
+    annotator_aggregation="individual_average",
+)
+```
+
+!!! tip "Custom Scorer Requirements"
+    **Required methods to implement:**
+    
+    1. **`can_score_task(sample_label)`** - Check if scorer can handle the data type
+    2. **`compute_score_async(judge_data, human_data, task_name, judge_id, aggregation_mode)`** - Core scoring logic  
+    3. **`aggregate_results(results, scores_dir, unique_name)`** - Optional visualization method
+    
+    **Guidelines:**
+    
+    - Call `super().__init__(scorer_name="your_scorer_name")` in constructor
+    - Return `BaseScoringResult` from `compute_score_async()`
+    - Handle edge cases (empty data, mismatched IDs, etc.)
+    - Add meaningful metadata for debugging and transparency
+
